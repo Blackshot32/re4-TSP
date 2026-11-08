@@ -3,14 +3,16 @@
 //
 //   re4_host --play [--data DIR] [--modules DIR] [--cache DIR] [--scale N]
 //
-//   --scale 1: 0.5x EFB (320x224, the fastest), 2: the GameCube's 640x528
+//   --scale is in half-native units: 1 = 320x264 EFB, 2 = 640x528,
+//   3 = 960x792, 4 = 1280x1056. Visible XFB size depends on the game.
 //   environment: RE4_FRONT_ASPECT=43|stretch|xfb, RE4_FRONT_POTATO=0..3,
-//                RE4_FRONT_SCALE=1|2, RE4_FRONT_MERGE=1, RE4_FRONT_FXAA=1,
+//                RE4_FRONT_SCALE=1..4, RE4_FRONT_MERGE=1, RE4_FRONT_FXAA=1,
 //                RE4_FRONT_VSYNC=0, RE4_FRONT_LOG=FILE
 //
 // Exit: START+SELECT held two seconds, or closing the window (Esc on a PC).
 #include "re4_core.h"
 #include "re4_gx_frame.h"
+#include "re4_cpu_info.h"
 #include "gx_gl.h"
 
 #include <SDL.h>
@@ -211,6 +213,7 @@ extern "C" int re4_front_main(int argc, char** argv)
     gPotato = envInt("RE4_FRONT_POTATO", 3);
     gMerge = envOn("RE4_FRONT_MERGE");
     gFxaa = envOn("RE4_FRONT_FXAA");
+    const bool mergePrewarm = envInt("RE4_FRONT_MERGE_PREWARM", 1) != 0;
     if (const char* path = getenv("RE4_FRONT_LOG")) gLog = fopen(path, "w");
 
     logf("front: data=%s modules=%s cache=%s halves=%d potato=%d", data, modules, cache, halves, gPotato);
@@ -265,8 +268,10 @@ extern "C" int re4_front_main(int argc, char** argv)
     opt.anisotropy = 1.0f;
     // experiments, off by default: the persistent vertex ring (RE4_FRONT_VRING) and
     // glInvalidateFramebuffer on the copy targets (RE4_FRONT_INVALIDATE)
-    opt.vertexRing = envOn("RE4_FRONT_VRING");
-    opt.invalidate = envOn("RE4_FRONT_INVALIDATE");
+    // ALT: when MERGE=1 enable both by default (GE8300 benefits, fallback safe).
+    const bool mergeHint = gMerge; // gMerge parsed above
+    opt.vertexRing = envOn("RE4_FRONT_VRING") || (mergeHint && !envOn("RE4_FRONT_VRING_OFF"));
+    opt.invalidate = envOn("RE4_FRONT_INVALIDATE") || (mergeHint && !envOn("RE4_FRONT_INVALIDATE_OFF"));
     opt.presentSharp = envOn("RE4_FRONT_SHARP");
     gx.SetOptions(opt);
     std::string err;
@@ -316,6 +321,8 @@ extern "C" int re4_front_main(int argc, char** argv)
     double last = nowSec(), lastLog = last, nextVsync = last;
     unsigned frames = 0, chunks = 0, skipped = 0, runs = 0;
     double runMs = 0, presentMs = 0, swapMs = 0, worstRun = 0;
+    double runCpuMs = 0, warmMs = 0;
+    unsigned warmPrograms = 0;
     re4gx::GxStats lastStats{};
     int room = -1;
     unsigned snapshotEvery = 0;
@@ -389,6 +396,7 @@ extern "C" int re4_front_main(int argc, char** argv)
             SDL_Delay(1);
         } else {
             const double t0 = nowSec();
+            const long long cpu0 = re4cpu::ThreadNs();
             for (int i = 0; i < n; i++) {
                 if (i + 1 < n && gx.CanSkip(*list[i], *list[i + 1])) {
                     gx.Skip(*list[i]);
@@ -400,6 +408,8 @@ extern "C" int re4_front_main(int argc, char** argv)
                 if (list[i] != replayChunk) re4_core_gx_release(list[i]);
             }
             const double t1 = nowSec();
+            const long long cpu1 = re4cpu::ThreadNs();
+            if (cpu0 && cpu1 >= cpu0) runCpuMs += (cpu1 - cpu0) / 1e6;
             const double ms = (t1 - t0) * 1000.0;
             runMs += ms;
             if (ms > worstRun) worstRun = ms;
@@ -411,6 +421,15 @@ extern "C" int re4_front_main(int argc, char** argv)
             const double t3 = nowSec();
             swapMs += (t3 - t2) * 1000.0;
             frames++;
+            // On a slow device the queue may never empty: idle-only Prewarm
+            // starves merge shaders while MergePlan still costs CPU/uploads.
+            // Drain at most one requested shader per present, after showing it.
+            // Loading/linking can exceed a frame; account for it separately.
+            if (gMerge && mergePrewarm && gx.PendingMergedPrograms()) {
+                const double warmStart = nowSec();
+                if (gx.PrewarmMerged()) warmPrograms++;
+                warmMs += (nowSec() - warmStart) * 1000.0;
+            }
         }
 
         // the display's vsync (the game's VI locks to a display near 60 Hz)
@@ -436,12 +455,20 @@ extern "C" int re4_front_main(int argc, char** argv)
                  st.mergeTaken - lastStats.mergeTaken,
                  st.uniformUploads - lastStats.uniformUploads, st.programSwitches - lastStats.programSwitches,
                  st.textureBinds - lastStats.textureBinds, st.stateChanges - lastStats.stateChanges,
-                 st.attributeSetups - lastStats.attributeSetups);
+                  st.attributeSetups - lastStats.attributeSetups);
+            logf("front-work: batch_cpu %.1f batch_non_cpu %.1f ms/present | merge_pending %u serviced %u warm %.1f ms | no_merge_program +%u shader_errors +%u missing_textures +%u state_calls_saved +%u",
+                 runCpuMs / f, std::fmax(0.0, runMs - runCpuMs) / f,
+                 gx.PendingMergedPrograms(), warmPrograms, warmMs,
+                 st.mergeRunBreak[re4gx::GxStats::kRunNoProgram] - lastStats.mergeRunBreak[re4gx::GxStats::kRunNoProgram],
+                 st.shaderErrors - lastStats.shaderErrors, st.missingTextures - lastStats.missingTextures,
+                 st.granularSkips - lastStats.granularSkips);
             gxprof::Report(frames, st.draws - lastStats.draws, st.mergeBatches - lastStats.mergeBatches);
             gxdiag::Report(gxprof::enabled);
             lastStats = st;
             frames = chunks = skipped = runs = 0;
             runMs = presentMs = swapMs = worstRun = 0;
+            runCpuMs = warmMs = 0;
+            warmPrograms = 0;
             lastLog = t;
             last = t;
         }

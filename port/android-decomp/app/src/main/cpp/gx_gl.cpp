@@ -385,6 +385,9 @@ struct Copy {
   unsigned serial = 0;
   unsigned kind = 0; // 0 colour, 1 one channel (value in .r), 2 two channels (.a high, .r low)
   bool read = false;  // read as a texture since it was made (GxStats::copyRead, a measurement)
+  // RE4_GX_COPY_ELIDE: copies to this address drawn over unread, one after the other; from kElideAfter on
+  // the copy is left out (but every kElideRecheck-th), until one is read again
+  unsigned deadRun = 0, sinceExec = 0;
 };
 
 } // namespace
@@ -435,6 +438,7 @@ struct GxRenderer::Impl {
   // FXAA (GxRenderer::SetFxaa): the smoothed copy of the XFB, shown instead of it while fxaaShown
   bool fxaaOn = false, fxaaShown = false;
   bool tvFilter = false;  // SetTvFilter
+  bool copyElide = false;  // RE4_GX_COPY_ELIDE=1: texture copies nobody reads are left out (EfbCopy)
   bool tvLogged = false;
   GLuint fxaaTex = 0, fxaaFbo = 0, fxaaProgram = 0;
   unsigned fxaaTexW = 0, fxaaTexH = 0;
@@ -625,12 +629,29 @@ struct GxRenderer::Impl {
     splitAt = now;
   }
 
+  // The GL render state the geometry path believes is current, piece by piece. Emitting only the
+  // pieces that changed saves driver calls (the biggest CPU cost on the TSP). Every auxiliary pass
+  // invalidates it through Touched()/SaveAndPlainState()/BindFbo(non-EFB), exactly where the combined
+  // stateValid flag is cleared, so the cache is never reused across a pass that changed GL state.
+  struct GlState {
+    bool viewport = false;   int vw = 0, vh = 0;
+    bool scissor = false;    int sx = 0, sy = 0, sw = 0, sh = 0;
+    bool depth = false;      bool depthTest = false; GLenum depthFunc = 0; bool depthMask = false;
+    bool colorMask = false;  bool cmR = false, cmG = false, cmB = false, cmA = false;
+    bool blend = false;      bool blendOn = false; GLenum beRGB = 0, beA = 0;
+                             GLenum bsRGB = 0, bdRGB = 0, bsA = 0, bdA = 0;
+    bool cull = false;       bool cullOn = false; GLenum cullFace = 0;
+    bool lineWidth = false;  float lineW = 1.0f;
+  } glState;
+  bool granularState = false;  // RE4_GX_GRANULAR_STATE
+
   // Other passes (uploads, copies, palettes, presenting) changed GL state.
   void Touched() {
     stateValid = false;
     unitsValid = false;
     vaoBound = false;
     current = nullptr;
+    glState = GlState{};
   }
 
   // the texture bound to each map
@@ -2241,6 +2262,7 @@ struct GxRenderer::Impl {
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     if (fbo != efbFbo) {
       efbLeft = true;
+      glState = GlState{};  // an auxiliary target clobbers geometry state
       return;
     }
     if (efbLeft && tiledMsaa)
@@ -2717,6 +2739,7 @@ struct GxRenderer::Impl {
     glDisable(GL_SCISSOR_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDepthMask(GL_TRUE);
+    glState = GlState{};
   }
 
   // The colour of the bound framebuffer is about to be drawn over completely (or only that part
@@ -2757,6 +2780,149 @@ struct GxRenderer::Impl {
     }
     stats.stateChanges++;
     BindFbo(DrawFbo());
+    if (granularState) {
+      // Granular state cache (RE4_GX_GRANULAR_STATE=1): emit only the pieces that differ from what
+      // the last geometry draw left behind. The side effects (destination alpha) run here, too.
+      const int vpW = Lo(kEfbWidth), vpH = Lo(kEfbHeight);
+      const int xoff = static_cast<int>(bp[0x59] & 0x3FF) * 2, yoff = static_cast<int>((bp[0x59] >> 10) & 0x3FF) * 2;
+      const int x0 = std::max(0, static_cast<int>((bp[0x20] >> 12) & 0x7FF) - xoff);
+      const int y0 = std::max(0, static_cast<int>(bp[0x20] & 0x7FF) - yoff);
+      const int x1 = std::min(kEfbWidth, static_cast<int>((bp[0x21] >> 12) & 0x7FF) - xoff + 1);
+      const int y1 = std::min(kEfbHeight, static_cast<int>(bp[0x21] & 0x7FF) - yoff + 1);
+      const int scX = Lo(x0), scY = Lo(y0), scW = std::max(0, Lo(x1) - Lo(x0)), scH = std::max(0, Lo(y1) - Lo(y0));
+      // depth
+      const std::uint32_t z = bp[0x40];
+      const bool wantDepthTest = (z & 1) != 0;
+      static const GLenum depthFuncTable[8] = {GL_NEVER, GL_LESS, GL_EQUAL, GL_LEQUAL, GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
+      const GLenum wantDepthFunc = depthFuncTable[(z >> 1) & 7];
+      const bool wantDepthMask = (z >> 4) & 1;
+      // blending, colour and alpha update (destination alpha side effects as before)
+      const std::uint32_t c = bp[0x41];
+      const bool alphaFormat = (bp[0x43] & 7) == 1;
+      const bool alphaWrite = ((c >> 4) & 1) && alphaFormat, colorWrite = (c >> 3) & 1;
+      const bool wantCmA = alphaWrite, wantCmR = colorWrite, wantCmG = colorWrite, wantCmB = colorWrite;
+      const bool dstAlpha = alphaWrite && ((bp[0x42] >> 8) & 1);
+      const int dstValue = static_cast<int>(bp[0x42] & 0xFF);
+      int shaderAlpha = -1;
+      bool wantBlendOn = false;
+      GLenum wantBeRGB = GL_FUNC_ADD, wantBeA = GL_FUNC_ADD, wantBsRGB = GL_ONE, wantBdRGB = GL_ZERO, wantBsA = GL_ONE, wantBdA = GL_ZERO;
+      if ((c >> 11) & 1) {
+        wantBlendOn = true;
+        wantBeRGB = GL_FUNC_REVERSE_SUBTRACT;
+        wantBeA = dstAlpha ? GL_FUNC_ADD : GL_FUNC_REVERSE_SUBTRACT;
+        wantBsRGB = GL_ONE; wantBdRGB = GL_ONE; wantBsA = GL_ONE; wantBdA = dstAlpha ? GL_ZERO : GL_ONE;
+        if (dstAlpha)
+          shaderAlpha = dstValue;
+      } else if (c & 1) {
+        static const GLenum src[8] = {GL_ZERO, GL_ONE, GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR,
+                                      GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
+        static const GLenum dst[8] = {GL_ZERO, GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR,
+                                      GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
+        const unsigned sf = (c >> 8) & 7, df = (c >> 5) & 7;
+        wantBlendOn = true;
+        wantBsRGB = src[sf]; wantBdRGB = dst[df];
+        if (!dstAlpha) {
+          wantBsA = src[sf]; wantBdA = dst[df];
+        } else if (!colorWrite || (sf != 4 && sf != 5 && df != 4 && df != 5)) {
+          wantBsA = GL_ONE; wantBdA = GL_ZERO; shaderAlpha = dstValue;
+        } else {
+          wantBsA = GL_ZERO; wantBdA = GL_ZERO;
+          if (dstValue != 0)
+            stats.dstAlphaApprox++;
+        }
+      } else if ((c >> 1) & 1) {
+        const unsigned op = (c >> 12) & 15;
+        wantBlendOn = true;
+        if (op == 0) { wantBsRGB = GL_ZERO; wantBdRGB = GL_ZERO; }
+        else if (op == 5) { wantBsRGB = GL_ZERO; wantBdRGB = GL_ONE; }
+        else if (op == 15) { wantBsRGB = GL_ONE; wantBdRGB = GL_ONE; }
+        else { wantBsRGB = GL_ONE; wantBdRGB = GL_ZERO; }
+        wantBsA = wantBsRGB; wantBdA = wantBdRGB;
+        if (dstAlpha && op != 0 && op != 5 && op != 15)
+          shaderAlpha = dstValue;
+      } else {
+        if (dstAlpha)
+          shaderAlpha = dstValue;
+      }
+      if (px.alphaRef[2] != shaderAlpha) {
+        px.alphaRef[2] = shaderAlpha;
+        pxDirty = true;
+      }
+      // culling
+      const unsigned cull = (bp[0x00] >> 14) & 3;
+      const bool wantCullOn = primitive == RE4_GX_TRIANGLES && cull != 0;
+      const GLenum wantCullFace = cull == 1 ? GL_BACK : cull == 2 ? GL_FRONT : GL_FRONT_AND_BACK;
+      // lines and points
+      const float wantLineW = std::max(1.0f, static_cast<float>(bp[0x22] & 0xFF) / 6.0f * Sf(1));
+
+      if (!glState.viewport || glState.vw != vpW || glState.vh != vpH) {
+        glViewport(0, 0, vpW, vpH);
+        glState.viewport = true; glState.vw = vpW; glState.vh = vpH;
+      } else {
+        stats.granularSkips++;
+      }
+      if (!glState.scissor || glState.sx != scX || glState.sy != scY || glState.sw != scW || glState.sh != scH) {
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(scX, scY, scW, scH);
+        glState.scissor = true; glState.sx = scX; glState.sy = scY; glState.sw = scW; glState.sh = scH;
+      } else {
+        stats.granularSkips += 2;
+      }
+      if (!glState.depth || glState.depthTest != wantDepthTest ||
+          (wantDepthTest && (glState.depthFunc != wantDepthFunc || glState.depthMask != wantDepthMask))) {
+        if (wantDepthTest) {
+          glEnable(GL_DEPTH_TEST);
+          glDepthFunc(wantDepthFunc);
+          glDepthMask(wantDepthMask ? GL_TRUE : GL_FALSE);
+        } else {
+          glDisable(GL_DEPTH_TEST);
+          glDepthMask(GL_FALSE);
+        }
+        glState.depth = true; glState.depthTest = wantDepthTest; glState.depthFunc = wantDepthFunc; glState.depthMask = wantDepthMask;
+      } else {
+        stats.granularSkips += wantDepthTest ? 3 : 2;
+      }
+      if (!glState.colorMask || glState.cmR != wantCmR || glState.cmG != wantCmG || glState.cmB != wantCmB || glState.cmA != wantCmA) {
+        glColorMask(wantCmR ? GL_TRUE : GL_FALSE, wantCmG ? GL_TRUE : GL_FALSE, wantCmB ? GL_TRUE : GL_FALSE, wantCmA ? GL_TRUE : GL_FALSE);
+        glState.colorMask = true; glState.cmR = wantCmR; glState.cmG = wantCmG; glState.cmB = wantCmB; glState.cmA = wantCmA;
+      } else {
+        stats.granularSkips++;
+      }
+      if (!glState.blend || glState.blendOn != wantBlendOn ||
+          (wantBlendOn && (glState.beRGB != wantBeRGB || glState.beA != wantBeA || glState.bsRGB != wantBsRGB ||
+                           glState.bdRGB != wantBdRGB || glState.bsA != wantBsA || glState.bdA != wantBdA))) {
+        if (wantBlendOn) {
+          glEnable(GL_BLEND);
+          glBlendEquationSeparate(wantBeRGB, wantBeA);
+          glBlendFuncSeparate(wantBsRGB, wantBdRGB, wantBsA, wantBdA);
+        } else {
+          glDisable(GL_BLEND);
+        }
+        glState.blend = true; glState.blendOn = wantBlendOn;
+        glState.beRGB = wantBeRGB; glState.beA = wantBeA;
+        glState.bsRGB = wantBsRGB; glState.bdRGB = wantBdRGB; glState.bsA = wantBsA; glState.bdA = wantBdA;
+      } else {
+        stats.granularSkips += wantBlendOn ? 3 : 1;
+      }
+      if (!glState.cull || glState.cullOn != wantCullOn || (wantCullOn && glState.cullFace != wantCullFace)) {
+        if (wantCullOn) {
+          glEnable(GL_CULL_FACE);
+          glCullFace(wantCullFace);
+        } else {
+          glDisable(GL_CULL_FACE);
+        }
+        glState.cull = true; glState.cullOn = wantCullOn; glState.cullFace = wantCullFace;
+      } else {
+        stats.granularSkips += wantCullOn ? 2 : 1;
+      }
+      if (!glState.lineWidth || glState.lineW != wantLineW) {
+        glLineWidth(wantLineW);
+        glState.lineWidth = true; glState.lineW = wantLineW;
+      } else {
+        stats.granularSkips++;
+      }
+      return;
+    }
     glViewport(0, 0, Lo(kEfbWidth), Lo(kEfbHeight));
     // scissor: registers in EFB pixels + 342, minus the scissor offset (BP 0x59, in 2 pixels)
     const int xoff = static_cast<int>(bp[0x59] & 0x3FF) * 2, yoff = static_cast<int>((bp[0x59] >> 10) & 0x3FF) * 2;
@@ -3780,6 +3946,29 @@ struct GxRenderer::Impl {
       Copy &c = interpPass ? interpCopies[dest] : copies[dest];
       if (c.id && !c.read && !interpPass)
         stats.copyOverwrittenUnread++;
+      // Copy elision (opt-in): on a tile GPU every copy to a texture ends the EFB's render pass and
+      // opens one for its own target. A destination whose last kElideAfter copies were all drawn over
+      // before anybody read them is not read at all (the effect it feeds is switched off, e.g. by
+      // the potato mode): its copy is left out, but the EFB's clear that goes with it is kept. Every
+      // kElideRecheck-th copy is made anyway, and one read of the texture (even of an old one:
+      // a picture of a stale blur at worst) puts the destination back to copying every picture.
+      if (copyElide && !interpPass && c.id) {
+        constexpr unsigned kElideAfter = 8, kElideRecheck = 16;
+        if (c.read)
+          c.deadRun = 0;
+        else if (c.deadRun < 1000000)
+          c.deadRun++;
+        if (c.deadRun >= kElideAfter && c.width == static_cast<unsigned>(ow) && c.height == static_cast<unsigned>(oh) &&
+            ++c.sinceExec % kElideRecheck != 0) {
+          c.read = false;
+          stats.copyElided++;
+          SaveAndPlainState();
+          BindFbo(DrawFbo());
+          ClearAfterCopy(control, x, y, w, h);
+          return;
+        }
+        c.sinceExec = 0;
+      }
       c.read = false;
       if (!c.id || c.width != static_cast<unsigned>(ow) || c.height != static_cast<unsigned>(oh)) {
         if (c.id)
@@ -5439,6 +5628,8 @@ struct GxRenderer::Impl {
 GxRenderer::GxRenderer() : impl_(new Impl) {
   const char *tv = getenv("RE4_GX_TV_FILTER");  // the TV filter from the start (gx_chunk_render, tests)
   impl_->tvFilter = tv && *tv == '1';
+  const char *elide = getenv("RE4_GX_COPY_ELIDE");  // texture copies nobody reads are left out (see EfbCopy)
+  impl_->copyElide = elide && *elide == '1';
   const char *psx = getenv("RE4_GX_PSX");  // the PSone demake from the start (gx_chunk_render, tests)
   impl_->psxOn = psx && *psx == '1';
   const char *flares = getenv("RE4_GX_FLARES");  // the lens flares from the start (gx_chunk_render, tests)
@@ -5568,6 +5759,8 @@ bool GxRenderer::InitHalves(int halves, std::string *error) {
   // merged draw calls (SetMerge): RE4_GX_MERGE=1 turns them on; the block's own buffer (without the stream)
   if (const char *merge = std::getenv("RE4_GX_MERGE"))
     m.mergeOn = *merge == '1';
+  if (const char *granular = std::getenv("RE4_GX_GRANULAR_STATE"))
+    m.granularState = *granular == '1';
   glGenBuffers(1, &m.mergeUbo);
   glBindBuffer(GL_UNIFORM_BUFFER, m.mergeUbo);
   glBufferData(GL_UNIFORM_BUFFER, sizeof(MergeBlock), nullptr, GL_DYNAMIC_DRAW);
@@ -6274,6 +6467,20 @@ bool GxRenderer::SetProgramCache(const std::string &folder) {
   return true;
 }
 
+unsigned GxRenderer::PendingMergedPrograms() const {
+  return static_cast<unsigned>(impl_->mergeWanted.size());
+}
+
+bool GxRenderer::PrewarmMerged() {
+  Impl &m = *impl_;
+  if (m.mergeWanted.empty())
+    return false;
+  const ShaderKey k = m.mergeWanted.back();
+  m.mergeWanted.pop_back();
+  m.ProgramFor(k, true);
+  return true;
+}
+
 bool GxRenderer::Prewarm(double budgetMs) {
   Impl &m = *impl_;
   const auto start = std::chrono::steady_clock::now();
@@ -6281,9 +6488,7 @@ bool GxRenderer::Prewarm(double budgetMs) {
   bool made = false;
   // the programs of merged draw calls the chunks so far wanted (SetMerge)
   while (!m.mergeWanted.empty() && !(made && ms >= budgetMs)) {
-    const ShaderKey k = m.mergeWanted.back();
-    m.mergeWanted.pop_back();
-    m.ProgramFor(k, true);
+    PrewarmMerged();
     made = true;
     ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
   }

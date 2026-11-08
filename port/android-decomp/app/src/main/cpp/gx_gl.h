@@ -57,6 +57,7 @@ struct GxStats {
   unsigned uniformSame = 0;  // XF parts written again with the values already sent: not uploaded
   unsigned uniformUploads = 0, uniformBytes = 0, programSwitches = 0, textureBinds = 0, stateChanges = 0,
            attributeSetups = 0;
+  unsigned granularSkips = 0;  // GL state calls saved by the granular cache (RE4_GX_GRANULAR_STATE=1)
   unsigned streamWaits = 0;  // the uniform stream waited for the GPU before reusing a quarter
   // draws that needed no GL change after the draw before them in the same chunk (same program, textures,
   // samplers, state, attribute setup, uniforms, primitive, no copy between): one draw call could take
@@ -72,6 +73,7 @@ struct GxStats {
   // whole picture w >= 500, half size, depth, smaller), and the render thread's time for them
   // (RE4_GX_COPY_TIME=1: glFinish before and after each copy, so it is the GPU's time too; a measurement only)
   unsigned copyRead = 0, copyOverwrittenUnread = 0;
+  unsigned copyElided = 0;  // RE4_GX_COPY_ELIDE: copies left out because nobody reads their texture
   // (and, as kinds of their own, the display copy with its FXAA and the gameplay autofocus: the other big
   // parts of the BP time)
   enum { kCopyFull, kCopyHalf, kCopyDepth, kCopySmall, kCopyDisplay, kCopyFocus, kCopyKinds };
@@ -324,6 +326,10 @@ public:
   // 22.10.2026 23:42: a chunk of up to 435 ms in r10b while 61 programs were made). False when
   // none are left.
   bool Prewarm(double budgetMs);
+  // Service one requested merge shader between frames, even when no idle refresh
+  // is available. May link synchronously; a single program is not a time budget.
+  bool PrewarmMerged();
+  unsigned PendingMergedPrograms() const;
   // The app's list of programs (a key list file, WriteProgramKeyList): Prewarm takes them too, for
   // the MSAA setting in use. Before the first Prewarm.
   void SetProgramList(const std::string &path);

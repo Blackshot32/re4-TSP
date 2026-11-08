@@ -18,10 +18,14 @@ Este fork reúne el frontend Linux, cambios del renderer GX/OpenGL ES, diagnóst
 
 ### Archivos útiles
 
+- [Calidad de imagen: perfiles x2/x3 y mediciones en TSP](tsp-local/CALIDAD.md). Multiplican la resolución inicial; las pruebas muestran una caída importante de FPS.
+- [Auditoría del renderer, adaptación de Android y dependencias](tsp-local/AUDITORIA-X2.md). El launcher usa ahora x2 por defecto (1× nativo).
+
 - `port/whole/host/front.cpp`: frontend Linux/TSP.
 - `port/android-decomp/app/src/main/cpp/gx_gl.cpp`: renderer compartido.
 - `tsp-local/`: launchers e informes de desarrollo.
 - `profile_tsp.py`, `summarize_diagnostics.py`: herramientas de diagnóstico. El profiler puede reiniciar el juego en la consola: revisar antes de ejecutarlo.
+- `bench_tsp.py`: benchmark automático (`status` para un vistazo, `run` para ejecutar y comparar casos por SSH, `analyze` para reparsear logs). Mata el juego entre casos y reinicia MainUI; no usarlo mientras se juega.
 
 ## English
 
@@ -37,6 +41,10 @@ This fork contains a Linux frontend, GX/OpenGL ES renderer changes, diagnostics,
 - `tsp-local/` scripts use development paths and are not an installer. The current launcher expects `/mnt/SDCARD/re4-poc/` and your own data at `/mnt/SDCARD/re4-data/`.
 - The existing container recipe requires a local base image; a standalone reproducible build guide is not available yet.
 - Review diagnostic scripts before running them: `profile_tsp.py` can restart the game on the device.
+
+Image quality: `RE4_QUALITY=x2` / `x3` select 1× / 1.5× GameCube-native resolution
+with the updated launcher (the original TSP default is 0.5×). Device tests show a
+substantial FPS cost. See the [quality guide and measurements (Spanish)](tsp-local/CALIDAD.md).
 
 ## Créditos / Credits and licensing
 

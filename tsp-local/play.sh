@@ -1,10 +1,24 @@
 #!/bin/sh
+# Profiles multiply the old 0.5x resolution, not the GameCube native resolution.
+# Explicit RE4_FRONT_SCALE overrides the profile for controlled comparisons.
+case "${RE4_QUALITY:-x2}" in
+  performance) profile_scale=1 ;;
+  x2) profile_scale=2 ;;
+  x3) profile_scale=3 ;;
+  x4) profile_scale=4 ;;
+  *) echo "RE4_QUALITY: use performance, x2, x3 or x4" >&2; exit 1 ;;
+esac
+export RE4_FRONT_SCALE=${RE4_FRONT_SCALE:-$profile_scale}
+case "$RE4_FRONT_SCALE" in
+  1|2|3|4) ;;
+  *) echo "RE4_FRONT_SCALE: use 1, 2, 3 or 4 (half-native units)" >&2; exit 1 ;;
+esac
+echo "RE4: quality=${RE4_QUALITY:-x2}, scale=$RE4_FRONT_SCALE/2 native, FXAA=${RE4_FRONT_FXAA:-0}"
 cd /mnt/SDCARD/re4-poc || exit 1
 export LD_LIBRARY_PATH=.
 export SDL_VIDEODRIVER=mali
 export SDL_AUDIODRIVER=alsa
 export SDL_GAMECONTROLLERCONFIG="03000000091200000031000000010000,TRIMUI Smart Pro Controller,a:b0,b:b1,x:b2,y:b3,back:b4,start:b5,guide:b12,leftstick:b10,rightstick:b11,leftshoulder:b6,rightshoulder:b7,dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:b8,righttrigger:b9,platform:Linux,"
-export RE4_FRONT_SCALE=${RE4_FRONT_SCALE:-1}
 export RE4_FRONT_POTATO=${RE4_FRONT_POTATO:-3}
 export RE4_FRONT_ASPECT=${RE4_FRONT_ASPECT:-43}
 export RE4_FRONT_LOG=/mnt/SDCARD/re4-poc/front.log

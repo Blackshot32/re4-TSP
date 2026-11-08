@@ -88,16 +88,17 @@ struct XfBlock {
 
 // A merged draw call's XFM parts (GxMergedVertexShader): per slot uMtx and the slot's first vertex
 // (gl_VertexID; ~0 for slots not used), then per slot posTex, normal and matAmb as in XfBlock (the
-// game sets the material colours per object). 10 slots fit the 16 KB every GLES 3.0 driver allows
-// for a uniform block (many Mali drivers no more).
-constexpr int kMergeSlots = 10;
+// game sets the material colours per object). 16 slots (25.6 KB) is above the 16 KB GLES 3.0
+// minimum, but PowerVR GE8300 supports 64 KB; on smaller drivers the merged program will fail
+// to link and DrawMerged falls back to single draws (no crash).
+constexpr int kMergeSlots = 16;
 constexpr int kMergeBinding = 4;
 constexpr int kMergeRows = 100;  // vec4 per slot: posTex 64, normal 32, matAmb 4
 struct MergeBlock {
   std::uint32_t slot[kMergeSlots][4];
   float xf[kMergeSlots][kMergeRows][4];
 };
-static_assert(sizeof(MergeBlock) <= 16384, "a uniform block of GLES 3.0");
+static_assert(sizeof(MergeBlock) <= 65536, "a uniform block of GLES 3.0 on GEO/GE8300");
 
 struct PixelBlock {
   std::int32_t colors[4][4];   // TEV registers prev, c0, c1, c2 (signed 11 bit)
