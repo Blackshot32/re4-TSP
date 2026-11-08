@@ -179,6 +179,11 @@ struct GxOptions {
   // menu, Performance, Experimental (wish of the project owner, 01.11.2026: the Mali tester's vertex upload
   // 20-35 % cheaper, no more pictures a second)
   bool vertexRing = false;
+  // the picture on its way to the screen as sharp bilinear (RE4_FRONT_SHARP): the bilinear
+  // filter's blend kept inside one screen pixel around each texel centre, so an upscaled
+  // 640x528 stays crisp instead of the soft stretch a plain bilinear gives. No cost worth
+  // naming (one 2D scale and two clamps per pixel at present time)
+  bool presentSharp = false;
 };
 
 class GxRenderer {

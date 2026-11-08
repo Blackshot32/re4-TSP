@@ -45,6 +45,8 @@
 #include <atomic>
 #include <cstdarg>
 
+#include "gx_gl_prof.h"
+
 #define GXLOG(...) re4gx::LogTo("RE4GX", __VA_ARGS__)
 
 namespace re4gx {
@@ -489,6 +491,7 @@ struct GxRenderer::Impl {
   GLuint copyProgram = 0, presentProgram = 0, paletteProgram = 0;
   GLint presentRows = -1;
   GLint copyMode = -1, copyRect = -1, copySize = -1, copyHalf = -1, copyGain = -1, copyLimit = -1;
+  GLint presentDst = -1, presentSharp = -1;
   GLint copyTaps = -1, copyStep = -1;  // the TV filter (SetTvFilter): taps of the lines above/at/below, a line
   // lowest EFB row (+1) a draw under a full-width scissor reached since the last display copy: the
   // rows below it were never drawn (the game's letterbox)
@@ -716,7 +719,8 @@ struct GxRenderer::Impl {
   // whole block): in the stream only the block's first bytes are written (the merged block's slots
   // in use), the rest of its place is left as it is.
   void UploadBlock(GLuint binding, GLuint buffer, const void *data, std::size_t offset, std::size_t bytes,
-                   std::size_t blockBytes, std::size_t copyBytes = 0) {
+                    std::size_t blockBytes, std::size_t copyBytes = 0) {
+    gxdiag::Phase phase(gxdiag::UniformCPU);
     stats.uniformUploads++;
     if (!stream) {
       glBindBuffer(GL_UNIFORM_BUFFER, buffer);
@@ -729,13 +733,14 @@ struct GxRenderer::Impl {
     const std::size_t at = StreamAlloc(blockBytes);
     const std::size_t copy = copyBytes ? std::min(copyBytes, blockBytes) : blockBytes;
     if (streamMap) {
-      std::memcpy(streamMap + at, data, copy);
+      gxprof::Bytes("cpuPersistentUniformWrite", copy);
+      gxdiag::Copy(streamMap + at, data, copy);
     } else {
       glBindBuffer(GL_UNIFORM_BUFFER, stream);
       void *dst = glMapBufferRange(GL_UNIFORM_BUFFER, static_cast<GLintptr>(at), static_cast<GLsizeiptr>(copy),
                                    GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
       if (dst) {
-        std::memcpy(dst, data, copy);
+        gxdiag::Copy(dst, data, copy);
         glUnmapBuffer(GL_UNIFORM_BUFFER);
       } else {
         glBufferSubData(GL_UNIFORM_BUFFER, static_cast<GLintptr>(at), static_cast<GLsizeiptr>(copy), data);
@@ -902,12 +907,12 @@ struct GxRenderer::Impl {
     }
     vtxBase = RingAlloc(vring, vbytes);
     if (chunk.vertexBytes)
-      std::memcpy(vring.map + vtxBase, chunk.vertices, chunk.vertexBytes);
+      gxdiag::Copy(vring.map + vtxBase, chunk.vertices, chunk.vertexBytes);
     idxBase = RingAlloc(iring, ibytes);
     if (own)
-      std::memcpy(iring.map + idxBase, chunk.indices, own);
+      gxdiag::Copy(iring.map + idxBase, chunk.indices, own);
     if (moved)
-      std::memcpy(iring.map + idxBase + own, mergeIndices.data(), moved);
+      gxdiag::Copy(iring.map + idxBase + own, mergeIndices.data(), moved);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, iring.buffer);
     drawVbo = vring.buffer;
     stats.ringChunks++;
@@ -1069,8 +1074,10 @@ struct GxRenderer::Impl {
   }
 
   void TimerInit() {
+    gxgpu::Init(GlExtension);
     const char *ext = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
     timerOn = ext && std::strstr(ext, "GL_EXT_disjoint_timer_query");
+    if (gxdiag::gpuOn && gxgpu::available) timerOn = false; // no nested TIME_ELAPSED queries
     // Mali drivers crash in the timer queries (moto g72, Mali-G57 MC2 / MT6789, 0.40-0.41.3:
     // SIGSEGV at address 0 in libGLES_mali.so under TimerPool::Collect, again and again after
     // minutes to an hour of play); the GPU time is a diagnosis only, so not there
@@ -2048,7 +2055,7 @@ struct GxRenderer::Impl {
           dirtyHi[i] = 0;
           continue;
         }
-        std::memcpy(sent, now, partBytes);
+        gxdiag::Copy(sent, now, partBytes);
         xfSentValid[i] = true;
         UploadBlock(kXfPartBinding[i], xfUbo[i], reinterpret_cast<const std::uint8_t *>(&xf) + first,
                     static_cast<std::size_t>(dirtyLo[i]) * 16 - first,
@@ -2518,6 +2525,7 @@ struct GxRenderer::Impl {
   }
 
   void Upload(const Re4GxTexture &t, const Re4GxChunk &chunk) {
+    gxdiag::Phase phase(gxdiag::TextureCPU);
     const std::uint64_t key = static_cast<std::uint64_t>(t.keyHi) << 32 | t.keyLo;
     if (t.dataBytes == 0 || t.dataOffset + t.dataBytes > chunk.blobBytes)
       return;
@@ -2729,6 +2737,7 @@ struct GxRenderer::Impl {
   }
 
   void ApplyState(unsigned primitive) {
+    gxdiag::Phase phase(gxdiag::State);
     // the picture's extent: the full-width scissors the draws of this picture ran under
     {
       const int xo = static_cast<int>(bp[0x59] & 0x3FF) * 2, yo = static_cast<int>((bp[0x59] >> 10) & 0x3FF) * 2;
@@ -2737,12 +2746,15 @@ struct GxRenderer::Impl {
         sceneBottom = std::max(sceneBottom, std::min(kEfbHeight, static_cast<int>(bp[0x21] & 0x7FF) - yo + 1));
     }
     // the registers below, as last applied: nothing to do while they hold
+    {
+    gxdiag::Phase signature(gxdiag::StateSignature);
     const std::uint32_t sig[10] = {bp[0x20],     bp[0x21],     bp[0x59],       bp[0x40] & 0x1F, bp[0x41] & 0xFFFF,
                                    bp[0x43] & 7, (bp[0x00] >> 14) & 3, bp[0x22] & 0xFF, primitive, bp[0x42] & 0x1FF};
     if (stateValid && std::memcmp(sig, stateSig, sizeof(sig)) == 0)
       return;
-    std::memcpy(stateSig, sig, sizeof(sig));
+    gxdiag::Copy(stateSig, sig, sizeof(sig));
     stateValid = true;
+    }
     stats.stateChanges++;
     BindFbo(DrawFbo());
     glViewport(0, 0, Lo(kEfbWidth), Lo(kEfbHeight));
@@ -2842,6 +2854,7 @@ struct GxRenderer::Impl {
   // --- draws --------------------------------------------------------------------
 
   ShaderKey MakeKey(const Re4GxDraw &d) {
+    gxdiag::Phase phase(gxdiag::ShaderKey);
     ShaderKey k;
     std::memset(&k, 0, sizeof(k));
     k.centroid = options.centroid && samples > 1 ? 1 : 0;
@@ -2965,6 +2978,7 @@ struct GxRenderer::Impl {
   // `merged`: the program of a merged draw call (GxMergedVertexShader). Its binary goes into the
   // cache, its key does not (Prewarm makes the single draws' programs).
   const Program *ProgramFor(const ShaderKey &k, bool merged = false) {
+    gxdiag::Phase phase(gxdiag::ShaderCache);
     auto &map = merged ? mergedPrograms : programs;
     auto it = map.find(k);
     if (it != map.end()) {
@@ -3031,8 +3045,8 @@ struct GxRenderer::Impl {
   }
 
   void FillPixel(const ShaderKey &k) {
-    std::memcpy(px.colors, tevColor, sizeof(tevColor));
-    std::memcpy(px.konst, tevKonst, sizeof(tevKonst));
+    gxdiag::Copy(px.colors, tevColor, sizeof(tevColor));
+    gxdiag::Copy(px.konst, tevKonst, sizeof(tevKonst));
     px.alphaRef[0] = static_cast<std::int32_t>(bp[0xF3] & 0xFF);
     px.alphaRef[1] = static_cast<std::int32_t>((bp[0xF3] >> 8) & 0xFF);
     const auto fogFloat = [](std::uint32_t v) {
@@ -3141,6 +3155,7 @@ struct GxRenderer::Impl {
   // `merge`: the merged draw call of a run that starts with `d` (DrawMerged; the XFM parts and
   // uMtx of its draws in mergeBlock).
   void Draw(const Re4GxDraw &d, const Re4GxChunk &chunk, const MergeCall *merge = nullptr) {
+    gxdiag::Phase phase(gxdiag::DrawCPU);
     // (every draw op counts for "n-th draw of its object", as Interpolate counts them ahead)
     curOwner = ownerBase ? (ownerBase ^ (static_cast<std::uint64_t>(ownerDraws++) + 1) * 0x9E3779B97F4A7C15ull) | 1 : 0;
     curLife = ownerLife;
@@ -3196,7 +3211,7 @@ struct GxRenderer::Impl {
       if (!pxValid || std::memcmp(&px, &pxSent, sizeof(px)) != 0) {
         UploadBlock(kPixelBinding, pxUbo, &px, 0, sizeof(PixelBlock), sizeof(PixelBlock));
         mergePixel = true;
-        pxSent = px;
+        { gxdiag::Phase copy(gxdiag::Memcpy); pxSent = px; }
         pxValid = true;
       }
     }
@@ -3209,7 +3224,7 @@ struct GxRenderer::Impl {
     if (!merge && p->mtx >= 0 && (p->lastMtx[0] != d.matrices[0] || p->lastMtx[1] != d.matrices[1] ||
                                   p->lastMtx[2] != d.matrices[2])) {
       glUniform3ui(p->mtx, d.matrices[0], d.matrices[1], d.matrices[2]);
-      std::memcpy(p->lastMtx, d.matrices, sizeof(p->lastMtx));
+      gxdiag::Copy(p->lastMtx, d.matrices, sizeof(p->lastMtx));
       mergeMatrix = true;
     }
     if (p->widen >= 0) {
@@ -3271,7 +3286,7 @@ struct GxRenderer::Impl {
     const void *indices = reinterpret_cast<const void *>(idxBase + static_cast<std::uintptr_t>(indexAt) * 2);
     Split(GxStats::kSplitBind);
     if (drawBaseVertex)
-      drawBaseVertex(mode, static_cast<GLsizei>(indexCount), GL_UNSIGNED_SHORT, indices, baseVertex);
+      gxprof::Invoke("glDrawElementsBaseVertex", drawBaseVertex, mode, static_cast<GLsizei>(indexCount), GL_UNSIGNED_SHORT, indices, baseVertex);
     else
       glDrawElements(mode, static_cast<GLsizei>(indexCount), GL_UNSIGNED_SHORT, indices);
     Split(GxStats::kSplitDraw);
@@ -3314,6 +3329,7 @@ struct GxRenderer::Impl {
 
   // The chains of `chunk` (mergeMarks) and their moved indices (mergeIndices); see MergeMark.
   void MergePlan(const Re4GxChunk &chunk) {
+    gxdiag::Phase phase(gxdiag::Merge);
     mergeMarks.clear();
     mergeIndices.clear();
     mergeNext = 0;
@@ -3342,9 +3358,11 @@ struct GxRenderer::Impl {
         const std::uint32_t first = valid ? d.vertexOffset / d.stride : 0;
         const std::uint16_t *idx = chunk.indices + d.indexOffset;
         std::uint32_t most = 0;
-        if (valid)
+        if (valid) {
+          gxdiag::Phase indices(gxdiag::Indices);
           for (std::uint32_t i = 0; i < d.indexCount; i++)
             most = std::max<std::uint32_t>(most, idx[i]);
+        }
         const bool joins = open && gap && valid && d.layout == last.layout && d.stride == last.stride &&
                            (d.primitive & 0xFF) == (last.primitive & 0xFF) &&
                            d.vertexOffset % d.stride == last.vertexOffset % last.stride &&
@@ -3378,8 +3396,11 @@ struct GxRenderer::Impl {
           m.base = starts ? first : mergeMarks[chainMark].base;
           mergeMarks.push_back(m);
           const std::uint32_t move = first - m.base;
+          {
+          gxdiag::Phase indices(gxdiag::Indices);
           for (std::uint32_t i = 0; i < d.indexCount; i++)
             mergeIndices.push_back(static_cast<std::uint16_t>(idx[i] + move));
+          }
           last = d;
           gap = true;
         }
@@ -3494,6 +3515,7 @@ struct GxRenderer::Impl {
   // A draw op that starts a chain's run (mergeMarks[mergeNext]): the run's draws as one draw call;
   // the next op to run.
   std::uint32_t DrawMerged(const Re4GxChunk &chunk, std::uint32_t at) {
+    gxdiag::Phase phase(gxdiag::Merge);
     std::size_t i = mergeNext;
     const MergeMark &start = mergeMarks[i];
     Re4GxDraw first;
@@ -3519,9 +3541,9 @@ struct GxRenderer::Impl {
         std::memcpy(&d, chunk.ops + m.op + 1, sizeof(d));
         if (xfRegsDirty)
           FillXfRegs();
-        std::memcpy(mergeBlock.xf[draws], xf.posTex, sizeof(xf.posTex) + sizeof(xf.normal));
-        std::memcpy(mergeBlock.xf[draws][96], xf.matAmb, sizeof(xf.matAmb));
-        std::memcpy(mergeBlock.slot[draws], d.matrices, sizeof(d.matrices));
+        gxdiag::Copy(mergeBlock.xf[draws], xf.posTex, sizeof(xf.posTex) + sizeof(xf.normal));
+        gxdiag::Copy(mergeBlock.xf[draws][96], xf.matAmb, sizeof(xf.matAmb));
+        gxdiag::Copy(mergeBlock.slot[draws], d.matrices, sizeof(d.matrices));
         mergeBlock.slot[draws][3] = m.first;
         draws++;
         count += d.indexCount;
@@ -3570,6 +3592,7 @@ struct GxRenderer::Impl {
 
   // One op of the chunk at `at` (Run); the next op's place (the end when the op is cut off).
   std::uint32_t Op(const Re4GxChunk &chunk, std::uint32_t at) {
+    gxdiag::Phase phase(gxdiag::Ops);
     const std::uint32_t head = chunk.ops[at];
     const std::uint32_t op = head & 0xFF, n = head >> 8;
     const std::uint32_t *p = chunk.ops + at + 1;
@@ -3590,7 +3613,7 @@ struct GxRenderer::Impl {
       break;
     case RE4_GX_OP_TLUT:
       if (n >= 3 && p[0] < kTlutBytes && p[2] + p[1] <= chunk.blobBytes)
-        std::memcpy(tlut.data() + p[0], chunk.blob + p[2], std::min<std::uint32_t>(p[1], kTlutBytes - p[0]));
+        gxdiag::Copy(tlut.data() + p[0], chunk.blob + p[2], std::min<std::uint32_t>(p[1], kTlutBytes - p[0]));
       break;
     case RE4_GX_OP_TEXTURE:
       if (n * 4 >= sizeof(Re4GxTexture)) {
@@ -3698,6 +3721,7 @@ struct GxRenderer::Impl {
   }
 
   void EfbCopy(std::uint32_t control) {
+    if (gxprof::enabled && gxprof::inRun) ++gxprof::efbCopies;
     const bool copyTime = std::getenv("RE4_GX_COPY_TIME") && *std::getenv("RE4_GX_COPY_TIME") == '1';
     std::chrono::steady_clock::time_point copyStart;
     if (copyTime) {
@@ -3711,6 +3735,8 @@ struct GxRenderer::Impl {
     const bool toXfb = (control >> 14) & 1;
     const bool half = !toXfb && ((control >> 9) & 1);
     const bool depth = !toXfb && (bp[0x43] & 7) == 3;
+    gxprof::CopyScope profileCopy(toXfb ? "copy-display" : depth ? "copy-depth" : half ? "copy-half" :
+                                 x == 0 && w >= 500 ? "copy-full" : "copy-small");
     int mode = 0;
     unsigned kind = 0;
     if (!toXfb)
@@ -5327,8 +5353,28 @@ struct GxRenderer::Impl {
         "}\n";
     // rows: XFB texture rows shown (offset, span; 0..1), row 0 at the top
     static const char kPresentFs[] = "#version 300 es\nprecision highp float;\n"
-                                     "uniform sampler2D src;\nuniform vec2 rows;\nin vec2 vUv;\nout vec4 o;\n"
-                                     "void main() { o = vec4(texture(src, vec2(vUv.x, rows.x + (1.0 - vUv.y) * rows.y)).rgb, 1.0); }\n";
+                                     "uniform sampler2D src;\nuniform vec2 rows;\nuniform vec2 dst;\n"
+                                     "uniform float sharp;\n"
+                                     "in vec2 vUv;\nout vec4 o;\n"
+                                     "void main() {\n"
+                                     // the region shown, in the XFB's texels: the full texture, or the
+                                     // band the VI shows (rows.x: the first line, rows.y: its height)
+                                     "  vec2 size = vec2(textureSize(src, 0));\n"
+                                     "  vec2 region = vec2(size.x, rows.y * size.y);\n"
+                                     "  vec2 p = vec2(vUv.x, 1.0 - vUv.y) * region;\n"
+                                     "  vec2 uv;\n"
+                                     // Sharp bilinear: saturate the bilinear blend within one screen
+                                     // pixel of each texel centre, so an upscale keeps flat texels
+                                     // and a short edge instead of the whole stretch smeared
+                                     "  if (sharp > 0.5 && dst.x > region.x && dst.y > region.y) {\n"
+                                     "    vec2 s = region / dst;\n"
+                                     "    vec2 w = clamp((fract(p) - 0.5) / s + 0.5, 0.0, 1.0);\n"
+                                     "    vec2 q = clamp(floor(p) + 0.5 + w, vec2(0.5), region - 0.5);\n"
+                                     "    uv = vec2(q.x / size.x, rows.x + q.y / size.y);\n"
+                                     "  } else {\n"
+                                     "    uv = vec2(vUv.x, rows.x + (1.0 - vUv.y) * rows.y);\n"
+                                     "  }\n"
+                                     "  o = vec4(texture(src, uv).rgb, 1.0);\n}\n";
     std::string log;
     copyProgram = Link(kQuadVs, kCopyFs, &log);
     if (!copyProgram) {
@@ -5366,6 +5412,9 @@ struct GxRenderer::Impl {
     glUseProgram(presentProgram);
     glUniform1i(glGetUniformLocation(presentProgram, "src"), 0);
     presentRows = glGetUniformLocation(presentProgram, "rows");
+    presentDst = glGetUniformLocation(presentProgram, "dst");
+    presentSharp = glGetUniformLocation(presentProgram, "sharp");
+    glUniform1f(presentSharp, 0.0f);  // bilinear until an option asks for the sharp one
     // d2: the EFB drawn back from the other set of textures, colour and depth texel for texel
     // (the depth as sampled, no arithmetic: the 24 bits come back as they were)
     static const char kRestoreFs[] = "#version 300 es\nprecision highp float;\n"
@@ -5412,7 +5461,7 @@ bool GxRenderer::InitHalves(int halves, std::string *error) {
   std::string dummy;
   if (!error)
     error = &dummy;
-  m.halves = std::max(2, halves);
+  m.halves = std::max(1, halves);
   // glDrawElementsBaseVertex: GLES 3.2, or the OES / EXT extension
   // (RE4_GX_BASEVERTEX=0 keeps the per-draw attribute setup)
   {
@@ -5713,6 +5762,9 @@ void GxRenderer::RescaleHalves(int halves) {
 
 void GxRenderer::Run(const Re4GxChunk &chunk) {
   Impl &m = *impl_;
+  gxdiag::RunScope diagnosticRun(m.skipDraws, chunk.sequence);
+  gxprof::RunScope profileRun(m.skipDraws);
+  gxdiag::Phase phase(gxdiag::Rest);
   if (chunk.version != RE4_GX_FRAME_VERSION)
     return;
   if (!m.interpPass)
@@ -5774,6 +5826,7 @@ void GxRenderer::Run(const Re4GxChunk &chunk) {
       m.uploadedSequence = chunk.sequence;
     }
   }
+  gxdiag::Vtx(chunk, !m.skipDraws && !uploaded, m.mergeIndices.size()*2);
   m.Split(GxStats::kSplitVertices);
   // the app drew the screen since the last chunk: a new pass
   m.efbLeft = true;
@@ -6145,6 +6198,8 @@ bool GxRenderer::Present(int x, int y, int w, int h, unsigned top, unsigned rows
     glUniform2f(m.presentRows, 0.0f, 1.0f);
   else
     glUniform2f(m.presentRows, static_cast<float>(top) / lines, static_cast<float>(rows) / lines);
+  glUniform2f(m.presentDst, static_cast<float>(w), static_cast<float>(h));
+  glUniform1f(m.presentSharp, m.options.presentSharp ? 1.0f : 0.0f);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, m.ShownXfb());
   glBindSampler(0, 0);
@@ -6364,6 +6419,7 @@ GxWarmResult WarmProgramCache(const std::string &cache, const std::string &list,
 }
 
 void GxRenderer::Release() {
+  gxgpu::Release();
   Impl &m = *impl_;
   if (m.roomDirty)
     m.SaveRoom();

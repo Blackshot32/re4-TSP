@@ -390,8 +390,12 @@ static int gciTool(int argc, char** argv)
     return r == RE4_CARD_OK ? 0 : 1;
 }
 
+extern "C" int re4_front_main(int argc, char** argv);
+
 extern "C" __attribute__((visibility("default"))) int re4_host_main(int argc, char** argv)
 {
+    if (argc > 1 && strcmp(argv[1], "--play") == 0)
+        return re4_front_main(argc, argv);
     char exe[PATH_MAX];
     ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
     if (len > 0) {

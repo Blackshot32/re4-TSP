@@ -46,6 +46,14 @@ set(RE4_OPT_LEVEL "" CACHE STRING "optimisation level of the whole build (empty 
 if(RE4_OPT_LEVEL)
     add_compile_options(-O${RE4_OPT_LEVEL})
 endif()
+# Code generation for the SoC actually deployed (TrimUI Smart Pro: 4 x Cortex-A53).
+# The vertex decoder is mixed integer/float code that gains from the A53 schedule; the
+# float results do not change, -ffp-contract=off below already forbids fused ops.
+# RE4_CPU="" turns it off (empty: the toolchain's own target).
+set(RE4_CPU "cortex-a53" CACHE STRING "target CPU of the arm64 build (empty: the toolchain's)")
+if(RE4_ARCH STREQUAL "arm64" AND RE4_CPU)
+    add_compile_options(-mcpu=${RE4_CPU})
+endif()
 if(RE4_ARCH STREQUAL "i686")
     # Single-precision float arithmetic in SSE registers, as on ARM (VFP) and
     # the GameCube: x87 keeps excess precision between operations, so float
@@ -591,12 +599,20 @@ if(NOT ANDROID)
     add_library(re4_probe_obj OBJECT tests/game_probe.cpp tests/core_probe.cpp tests/stream_probe.cpp
         tests/gx_probe.cpp tests/movie_probe.cpp tests/card_probe.cpp tests/instant_game_probe.cpp)
     target_link_libraries(re4_probe_obj PRIVATE re4_game_flags)
-    add_library(re4_hostlib SHARED host/main.cpp tests/runtime_tests.cpp tests/core_tests.cpp
+    add_library(re4_hostlib SHARED host/main.cpp host/front.cpp tests/runtime_tests.cpp tests/core_tests.cpp
         tests/core_remote_probe.cpp
         "${RE4_ROOT}/port/src/sha256.cpp"
+        "${RE4_ROOT}/port/android-decomp/app/src/main/cpp/gx_gl.cpp"
+        "${RE4_ROOT}/port/android-decomp/app/src/main/cpp/gx_gl_shader.cpp"
+        "${RE4_ROOT}/port/android-decomp/app/src/main/cpp/gx_texture.cpp"
         $<TARGET_OBJECTS:re4_probe_obj>)
     target_include_directories(re4_hostlib PRIVATE runtime "${RE4_ROOT}/port/include" "${RE4_ROOT}/port/tests"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include")
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${RE4_ROOT}/port/android-decomp/app/src/main/cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sdl2/include" "${CMAKE_CURRENT_SOURCE_DIR}/third_party/gles/include")
+    # the TSP's own SDL2/EGL/GLES (aarch64): the same ABI as the system's
+    target_link_directories(re4_hostlib PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tsp-libs")
+    target_link_libraries(re4_hostlib PRIVATE SDL2-2.0 EGL GLESv2 m)
     target_compile_features(re4_hostlib PRIVATE cxx_std_17)
     add_dependencies(re4_hostlib re4test_rel re4test_caller re4test_target)
     target_link_options(re4_hostlib PRIVATE -fuse-ld=lld)

@@ -24,3 +24,6 @@ tools/sn-gcc/cc1plus
 # external checkouts used by tools/research/mwccdbg (see its README)
 tools/research/mwccdbg/mwcc-debugger
 tools/research/mwccdbg/retrowin32
+
+# TSP device-specific binaries (do not commit)
+port/whole/third_party/tsp-libs/
