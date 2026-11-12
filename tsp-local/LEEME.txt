@@ -1,0 +1,136 @@
+RE4 para la TrimUI Smart Pro (TSP) - beta
+===========================================
+
+Este paquete trae el motor del port ya compilado. Solo necesitas tus propias
+imagenes de los dos discos del GameCube de Resident Evil 4 (el juego original
+de GameCube, no el remake). El port no incluye ningun dato del juego: el
+motor lee los archivos del disco en tiempo de ejecucion.
+
+Este paquete (re4-tsp-beta.zip)
+--------------------------------
+
+  re4-poc/     el motor: re4_host, las bibliotecas y los 117 modulos del
+               juego, y las bibliotecas de la consola (SDL2, EGL, GLESv2)
+  setup.py     el script que extrae los discos y deja la SD lista
+  tools/       el extractor de los discos (lo usa setup.py)
+  LEEME.txt    este archivo
+
+
+Como se juega
+-------------
+
+1. Copia las dos imagenes de los discos a una carpeta, por ejemplo "isos/".
+   Los archivos se llaman *.gcm (o *.iso). Mismo nombre, cualquier formato:
+   lo que importa es que sean las imagenes del GameCube.
+
+2. Ejecuta el script. En Windows:
+
+       python setup.py
+
+   En Linux y macOS:
+
+       python3 setup.py
+
+   Si Python no esta instalado en Windows, bajalo de python.org
+   (https://www.python.org/downloads/). No hace falta nada mas: el script
+   solo usa la biblioteca estandar.
+
+   El script extrae los dos discos (unos minutos la primera vez, 2.5 GB) y
+   deja la carpeta SD lista. Si lo vuelves a ejecutar con los mismos discos,
+   no repite la extraccion (1-2 segundos).
+
+3. Copia el contenido de la carpeta SD a la raiz de la tarjeta SD de la
+   TrimUI:
+
+       /mnt/SDCARD/re4-poc     el motor
+       /mnt/SDCARD/re4-data    los datos de los discos
+
+   En Windows, la tarjeta aparece como una unidad (D:, E:...). Copia las
+   carpetas re4-poc y re4-data a su raiz.
+
+4. En la consola, lanza el juego desde el menu de la TrimUI.
+
+Opciones
+--------
+
+  --isos CARPETA   donde estan las imagenes (por defecto, la carpeta actual)
+  --out CARPETA    donde armar la SD (por defecto, ./SD)
+  --force          vuelve a extraer aunque las imagenes no hayan cambiado
+
+
+Si algo falla
+-------------
+
+"ERROR: no hay imagenes de disco (.gcm o .iso)": las imagenes no estan en la
+carpeta que se le dijo a --isos.
+
+"ERROR: la extraccion fallo": las imagenes no son del GameCube, o estan
+corruptas. Comprueba que sean las del juego original de GameCube (G4BE08,
+G4BP08 o G4BJ08).
+
+El juego necesita el espacio de la tarjeta: unos 2.5 GB para los datos.
+
+
+This package (re4-tsp-beta.zip)
+--------------------------------
+
+  re4-poc/     the engine: re4_host, the libraries and the 117 game modules,
+               plus the console's own libraries (SDL2, EGL, GLESv2)
+  setup.py     the script that extracts the discs and prepares the SD card
+  tools/       the disc extractor (used by setup.py)
+  LEEME.txt    this file
+
+
+How to play
+-----------
+
+1. Copy the two disc images into a folder, for example "isos/". The files
+   are *.gcm (or *.iso). Any name works: what matters is that they are the
+   GameCube images of the game.
+
+2. Run the script. On Windows:
+
+       python setup.py
+
+   On Linux and macOS:
+
+       python3 setup.py
+
+   If Python is not installed on Windows, get it from python.org
+   (https://www.python.org/downloads/). Nothing else is needed: the script
+   only uses the standard library.
+
+   The script extracts both discs (a few minutes the first time, 2.5 GB) and
+   leaves the SD folder ready. Run it again with the same discs and it
+   reuses the previous extraction (1-2 seconds).
+
+3. Copy the contents of the SD folder to the root of the TrimUI's SD card:
+
+       /mnt/SDCARD/re4-poc     the engine
+       /mnt/SDCARD/re4-data    the data of the discs
+
+   On Windows the card shows up as a drive (D:, E:...). Copy the re4-poc and
+   re4-data folders to its root.
+
+4. On the console, start the game from the TrimUI's menu.
+
+
+Options
+-------
+
+  --isos FOLDER   where the disc images are (default: the current folder)
+  --out FOLDER    where to build the SD folder (default: ./SD)
+  --force         extract again even if the images have not changed
+
+
+If something goes wrong
+-----------------------
+
+"ERROR: no hay imagenes de disco (.gcm o .iso)": the images are not in the
+folder given to --isos.
+
+"ERROR: la extraccion fallo": the images are not GameCube images, or they
+are damaged. Check that they are from the original GameCube game (G4BE08,
+G4BP08 or G4BJ08).
+
+The game needs room on the card: about 2.5 GB for the data.

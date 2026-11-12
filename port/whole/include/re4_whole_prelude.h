@@ -4,7 +4,18 @@
  * redeclare a few C functions themselves (memcpy in joy.h, sprintf in xml.h);
  * after the system declaration those redeclarations are compatible.
  * math_sub.h defines its own inline fabsf, so libm's is renamed here exactly
- * as include/dolphin/types.h does it. */
+ * as include/dolphin/types.h does it.
+ *
+ * The rename takes the global name fabsf away, and libstdc++'s <cmath> (which
+ * its <math.h> wrapper pulls in) wants it back: "using ::fabsf;" then fails.
+ * The game units read the C library's <math.h> directly, without that
+ * wrapper, so <cmath> never enters the translation unit and the rename stays
+ * invisible. The macro is left defined for the whole unit (this header is
+ * force-included first), because a later <math.h> would otherwise pull the
+ * wrapper in. The game units use no C++ library header that needs <cmath>. */
+#if defined(__cplusplus) && !defined(_LIBCPP_VERSION)
+#define _GLIBCXX_INCLUDE_NEXT_C_HEADERS 1
+#endif
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>

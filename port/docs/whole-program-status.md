@@ -3,6 +3,53 @@
 Diese Datei ist das Gedächtnis zwischen den Sitzungen. Jede Sitzung liest sie
 zuerst und aktualisiert sie am Ende (siehe `CLAUDE.md`).
 
+## TSP-Beta: Port ohne Docker bauen, Spiel ohne Kompilieren installieren (12.11.2026, Branch `tsp-port`)
+
+Wunsch des Projektinhabers: dass die Spieler den Port (Beta) auf der TrimUI
+Smart Pro zum Laufen bringen koennen, ohne selbst zu kompilieren, und zwar
+von Windows aus. Die Entscheidung fiel gegen das Kompilieren beim Spieler:
+der Code des Ports ist bereits dekompiliert und im Repo, aus den Discs kommen
+nur die Assets (Daten), also wird der Motor kompiliert und veroeffentlicht,
+und der Spieler entpackt ihn und liefert seine eigenen Discs. Damit fallen
+Docker, WSL und ein Toolchain fuer den Spieler weg.
+
+1. **Der Port baut jetzt nativ (ohne Container).** `port/whole/cmake/linux-aarch64.cmake`
+   suchte das Sysroot fest unter `/usr/aarch64-linux-gnu` (Debian/Ubuntu-Layout) und
+   fand die GCC-Werkzeuge des Ziels nicht; `tsp_build.sh` sucht sie jetzt je nach
+   Distribution (apt, xbps, dnf, pacman) und legt `--sysroot` und `--gcc-toolchain`
+   fest. Zwei Aenderungen noetig, damit der native Build ueberhaupt laeuft:
+   - `port/whole/CMakeLists.txt`: der Trial-Link des Link-Plans (der entscheidet,
+     welche Symbole als Stub erzeugt werden) bekommt jetzt `--sysroot` und die
+     Compiler-Flags; ohne sie suchte der Linker den Interpreter des Ziels im Host.
+   - `port/whole/include/re4_whole_prelude.h`: das Umbenennen von libms `fabsf`
+     (das Spiel definiert in `math_sub.h` ein eigenes) nahm den globalen Namen weg,
+     und libstdc++ 14 will ihn in `<cmath>` wiederhaben ("using ::fabsf;"). Mit
+     `_GLIBCXX_INCLUDE_NEXT_C_HEADERS` liest der C-Compiler die C-Bibliothek direkt,
+     ohne den Wrapper, und `<cmath>` kommt gar nicht erst in die Ubersetzungseinheit.
+     Das war auch der Grund, warum der x86_64-Linux-Build (vor dieser Aenderung)
+     mit derselben Fehlermeldung abbrach: der Fehler ist aelter als der Container-Build.
+2. **Das Release-Paket.** `port/tools/tsp_package.sh` baut `dist/re4-tsp-beta.zip`:
+   `re4-poc/` (der Motor: `re4_host`, die vier Bibliotheken, die 117 Module und die
+   Konsolen-Bibliotheken SDL2/EGL/GLESv2 aus `port/whole/third_party/tsp-libs/`,
+   die nicht im Git liegen, weil sie Binaries des Geraets sind), `setup.py` und
+   `tools/` (der Disc-Extraktor). Getestet: ZIP 9,8 MB, 145 Dateien.
+3. **`tsp-local/setup.py`: der Spieler.** Nimmt die `.gcm`/`.iso` eines Ordners,
+   entpackt sie mit `whole_disc_folder.py` nach `re4-data/disc0` und `disc1` und legt
+   die SD fertig. Nur Standardbibliothek, damit es unter Windows ohne Installation
+   laeuft (Python von python.org). Pruefung: 1154 + 1090 Dateien, 0 Probleme.
+   Der Cache merkt sich die SHA-256 der Images: zweiter Lauf 1,9 s statt erneuter
+   Entpackung. Zwei Stolpersteine fuer Windows, die das Skript abfaengt:
+   der Entpacker stellt die Symbolischen Links der Konsolen-Bibliotheken nicht
+   wieder her (und der Explorator von Windows vor Version 11 auch nicht) und er
+   setzt kein Ausfuehrungsbit; beides macht das Skript wieder gerade.
+4. **Geprueft.** `tsp_build.sh` baut den Port aus dem Quelltext (ARM64, 117 Module)
+   und `tsp_check.sh` startet den Motor unter `qemu-aarch64`: `runtime-test: 0 failed`.
+   Der entpackte Motor aus dem ZIP startet mit den entpackten Disc-Daten und laeuft
+   in die Render-Schleife. Auf der Konsole selbst nicht getestet (keine hier).
+5. **Was der Spieler braucht:** die beiden Disc-Images des Originalspiels fuer
+   GameCube (G4BE08, G4BP08 oder G4BJ08) und Python. Keine Kompilierung, kein
+   Docker, kein WSL.
+
 ## Version 0.98.6-beta: japanische Discs ohne Zensur, Leuchten nur bei sichtbarer Lichtquelle, SELECT-Hinweis mit Verkaufs-Discs (06.11.2026, Branch `work`, Patches 0212–0213)
 
 Version 0.98.6-beta (versionCode 100), Releasetext `port/android-decomp/docs/releases/v0.98.6-beta.md`. Wunsch eines

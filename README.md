@@ -11,10 +11,28 @@ Este fork reúne el frontend Linux, cambios del renderer GX/OpenGL ES, diagnóst
 ### Descargar y probar
 
 - La rama de este trabajo es [`tsp-port`](https://github.com/Blackshot32/re4-TSP/tree/tsp-port).
-- La primera prerelease ofrece **código fuente en ZIP**, no un paquete listo para jugar. Requiere compilar y preparar dependencias y datos propios.
-- **No se incluyen imágenes de disco ni datos extraídos del juego.** Tampoco se distribuyen las bibliotecas binarias específicas de la consola en `port/whole/third_party/tsp-libs/`.
-- Los scripts en `tsp-local/` son herramientas experimentales con rutas de desarrollo, no un instalador. El launcher actual espera `/mnt/SDCARD/re4-poc/` y datos propios en `/mnt/SDCARD/re4-data/`.
-- La receta de contenedor existente depende de una imagen local; todavía no es una guía de compilación autónoma y reproducible.
+- La prerelease ofrece un **paquete listo para jugar** (`re4-tsp-beta.zip`): el motor compilado y un script que extrae tus discos. No hace falta Docker, WSL ni compilar nada.
+- **No se incluyen imágenes de disco ni datos extraídos del juego.** El jugador usa sus propias imágenes (`.gcm`/`.iso`) de los dos discos del GameCube.
+- Las bibliotecas de la consola (SDL2, EGL, GLESv2) van en el paquete (`port/whole/third_party/tsp-libs/`, que no está en git por ser binarios del dispositivo).
+
+#### Jugar desde Windows (o Linux, o macOS)
+
+1. Baja `re4-tsp-beta.zip` y descomprímelo.
+2. Copia tus dos imágenes de disco a una carpeta (por ejemplo `isos/`).
+3. Ejecuta `python setup.py` (en Linux/macOS, `python3 setup.py`).
+4. Copia las carpetas `re4-poc` y `re4-data` que deja en `SD/` a la raíz de la tarjeta SD de la TrimUI.
+5. En la consola, lanza el juego desde el menú.
+
+El script solo usa la biblioteca estándar de Python (no hay que instalar nada más), extrae los discos la primera vez y guarda su SHA-256 para no repetir el trabajo si los vuelves a ejecutar.
+
+#### Compilar el motor (para quien quiera)
+
+```bash
+port/tools/tsp_build.sh              # compila el port ARM64 en esta máquina
+port/tools/tsp_package.sh            # arma dist/re4-tsp-beta.zip
+```
+
+`tsp_build.sh` instala el toolchain que falte (clang, lld, cmake, ninja, python3 y el cross-toolchain `aarch64-linux-gnu`) según la distribución, y comprueba el motor con el test de runtime. No usa Docker.
 
 ### Archivos útiles
 
@@ -36,11 +54,29 @@ This fork contains a Linux frontend, GX/OpenGL ES renderer changes, diagnostics,
 ### Download and test
 
 - Development branch: [`tsp-port`](https://github.com/Blackshot32/re4-TSP/tree/tsp-port).
-- The initial prerelease is a **source-code ZIP**, not a ready-to-play package. Compilation, dependencies and your own game data are required.
-- **No disc images or extracted game assets are included.** Device-specific binaries in `port/whole/third_party/tsp-libs/` are also excluded.
-- `tsp-local/` scripts use development paths and are not an installer. The current launcher expects `/mnt/SDCARD/re4-poc/` and your own data at `/mnt/SDCARD/re4-data/`.
-- The existing container recipe requires a local base image; a standalone reproducible build guide is not available yet.
+- The prerelease offers a **ready-to-play package** (`re4-tsp-beta.zip`): the compiled engine plus a script that extracts your discs. No Docker, no WSL and no compiling needed.
+- **No disc images or extracted game assets are included.** The player uses their own images (`.gcm`/`.iso`) of the two GameCube discs.
+- The console's own libraries (SDL2, EGL, GLESv2) ship inside the package (`port/whole/third_party/tsp-libs/`, not in git because they are device binaries).
 - Review diagnostic scripts before running them: `profile_tsp.py` can restart the game on the device.
+
+#### Playing from Windows (or Linux, or macOS)
+
+1. Download `re4-tsp-beta.zip` and unpack it.
+2. Copy your two disc images into a folder (for example `isos/`).
+3. Run `python setup.py` (on Linux/macOS, `python3 setup.py`).
+4. Copy the `re4-poc` and `re4-data` folders it leaves in `SD/` to the root of the TrimUI's SD card.
+5. On the console, start the game from the menu.
+
+The script only uses the Python standard library (nothing else to install), extracts the discs the first time and keeps their SHA-256 so it does not repeat the work when run again.
+
+#### Building the engine (for whoever wants to)
+
+```bash
+port/tools/tsp_build.sh              # compiles the ARM64 port on this machine
+port/tools/tsp_package.sh            # builds dist/re4-tsp-beta.zip
+```
+
+`tsp_build.sh` installs whichever toolchain is missing (clang, lld, cmake, ninja, python3 and the `aarch64-linux-gnu` cross toolchain) according to the distribution, then checks the engine with the runtime test. No Docker involved.
 
 Image quality: `RE4_QUALITY=x2` / `x3` select 1× / 1.5× GameCube-native resolution
 with the updated launcher (the original TSP default is 0.5×). Device tests show a

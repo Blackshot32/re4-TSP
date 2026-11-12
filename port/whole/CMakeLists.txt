@@ -462,6 +462,20 @@ endforeach()
 if(CMAKE_CXX_COMPILER_TARGET)
     set(RE4_TARGET_FLAG "--target=${CMAKE_CXX_COMPILER_TARGET}")
 endif()
+# The trial link (link plan) must see the same environment as the real links:
+# the sysroot of the target and the GCC tools. Without them the linker looks
+# for the target's dynamic linker and the C++ library of the host and fails.
+# CMake passes the sysroot and the compiler's flags to the real links by
+# itself; the trial link drives the compiler directly, so it needs them here.
+# The Android build (the NDK toolchain) brings its own sysroot and flags.
+if(CMAKE_SYSROOT AND NOT ANDROID)
+    list(APPEND RE4_TARGET_FLAG "--sysroot=${CMAKE_SYSROOT}")
+endif()
+if(CMAKE_CXX_FLAGS AND NOT ANDROID)
+    # The compiler's own flags (the --gcc-toolchain of the cross build).
+    separate_arguments(_re4_cxx_flags NATIVE_COMMAND "${CMAKE_CXX_FLAGS}")
+    list(APPEND RE4_TARGET_FLAG ${_re4_cxx_flags})
+endif()
 if(ANDROID)
     # the trial link must see the Android logging and loader libraries, or
     # their functions would be planned as stubs

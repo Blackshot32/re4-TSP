@@ -24,6 +24,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+// std::size_t (used below). The game headers hide libm's fabsf, so the
+// libstdc++ <math.h> wrapper no longer drags <cmath> (and with it the
+// namespace std) into the unit; the header is named explicitly here.
+#include <cstddef>
 
 extern "C" {
 void ADXGC_SetupDvdFs(int mode);
